@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest>=8
+httpx2
+ipykernel
+matplotlib
+nbclient
+nbformat
