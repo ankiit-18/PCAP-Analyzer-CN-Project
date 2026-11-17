@@ -8,10 +8,11 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from . import capture, dhcp, dns, generic, http, icmp, ip, rtp, tcp as tcpmod, tls, udp
+from . import capture, dhcp, dns, generic, http, icmp, ip, rtp, scope as scopemod, tcp as tcpmod, tls, udp
 from .config import ENGINE_VERSION, Limits
 from .context import Context
 from .detect import detect
+from .errors import InvalidCapture
 from .extract import extract_packets
 from .tshark import Tshark
 from .util import jsonable, records
@@ -46,9 +47,15 @@ class Report:
         return self.details[key]
 
 
-def analyze(path: str, limits: Limits | None = None, progress=None, filename: str | None = None, tshark: Tshark | None = None) -> Report:
-    """Validate and analyse a capture. Raises engine.errors.EngineError subclasses (message is safe to show users)."""
+def analyze(path: str, limits: Limits | None = None, progress=None, filename: str | None = None, tshark: Tshark | None = None,
+            protocols=None) -> Report:
+    """Validate and analyse a capture. Raises engine.errors.EngineError subclasses (message is safe to show users).
+
+    protocols: None / "all" = everything (default). Or e.g. "tcp,udp" / ["tcp"] to analyse only those protocols (tcp, udp, dns, tls, quic, arp, ip):
+    statistics and packet rows are limited to that traffic and the other analysers are skipped (less time, less memory on large captures)."""
     say = progress or (lambda *_: None)
+    scope = scopemod.normalise(protocols)
+    flt = scopemod.display_filter(scope)
     limits = limits or Limits()
     ts = tshark or Tshark(limits)
     ts.require()
@@ -56,24 +63,34 @@ def analyze(path: str, limits: Limits | None = None, progress=None, filename: st
     ts.start_clock()
     kind = capture.validate_capture(path, limits)
 
-    say("1/5 capture totals, protocol hierarchy, IP endpoints (tshark -z)")
-    totals = capture.totals(ts, path)
-    hier, raw_phs = capture.hierarchy(ts, path)
-    endpoints = capture.endpoints(ts, path, "ip")
+    say("1/5 capture totals, protocol hierarchy, IP endpoints (one tshark pass)" + (f" - scope: {scopemod.label(scope)}" if scope else ""))
+    sec = capture.stats_bundle(ts, path, flt)
+    totals = capture.totals(ts, path, flt, raw=sec["io"])
+    hier, raw_phs = capture.hierarchy(ts, path, flt, raw=sec["phs"])
+    endpoints = capture.endpoints(ts, path, "ip", flt, raw=sec["ip"])
+    if scope and not totals["packets"]:
+        raise InvalidCapture(f"No {scopemod.label(scope)} packets were found in this capture. Choose different protocols, or analyse everything.")
 
     say("2/5 packet extraction (tshark -T fields)")
-    ex = extract_packets(ts, path, totals["packets"])
+    ex = extract_packets(ts, path, totals["packets"], flt)
     df = ex.packets
 
     say("3/5 TCP analysis")
-    tcp_res = tcpmod.analyze(df)
-    ctx = Context(ts=ts, path=path, limits=limits, packets=df, totals=totals, tcp=tcp_res, partial=ex.partial, max_packets=ex.limit if ex.partial else 0)
+    tcp_res = tcpmod.analyze(df, enabled=scope is None or "tcp" in scope)
+    ctx = Context(ts=ts, path=path, limits=limits, packets=df, totals=totals, tcp=tcp_res, partial=ex.partial, max_packets=ex.limit if ex.partial else 0, scope=scope)
 
     say("4/5 protocol analyzers")
     detected = detect(ctx)
+    if scope is not None:                    # a page is only built for the protocols that were selected
+        for d in detected:
+            if d["detail"] and scopemod.PAGE_SCOPE.get(d["key"]) not in scope:
+                d["detail"] = False
     keys = {d["key"] for d in detected}
-    jobs = {"ip": ANALYZERS["ip"]}
-    jobs.update({k: ANALYZERS[k] for k in ("udp", "dns", "http", "tls", "icmp", "dhcp", "rtp") if k in keys})
+    if scope is None:
+        jobs = {"ip": ANALYZERS["ip"]}
+        jobs.update({k: ANALYZERS[k] for k in ("udp", "dns", "http", "tls", "icmp", "dhcp", "rtp") if k in keys})
+    else:                                    # scoped run: only the selected analysers (each one is at least one more pass over the capture)
+        jobs = {k: ANALYZERS[k] for k in ("ip", "udp", "dns", "tls") if k in scope and (k == "ip" or k in keys)}
     details, views, warnings = {}, {}, []
     with ThreadPoolExecutor(max_workers=4) as pool:
         futs = {k: pool.submit(fn, ctx) for k, fn in jobs.items()}
@@ -93,24 +110,29 @@ def analyze(path: str, limits: Limits | None = None, progress=None, filename: st
         "avg_packet_size": (totals["bytes"] / totals["packets"]) if totals["packets"] else None,
         "avg_throughput_bps": (totals["bytes"] * 8 / dur) if dur else None, "avg_pps": (totals["packets"] / dur) if dur else None,
         "tcp_packets": s.get("tcp_packets", 0), "tcp_flows": s.get("tcp_flows", 0), "flows": s.get("tcp_flows", 0),
-        **{k: s.get(k) for k in ("retransmissions", "fast_retransmissions", "spurious_retransmissions", "out_of_order", "dup_acks", "seq_gaps", "lost_segments", "zero_windows", "resets",
+        **{k: s.get(k) for k in ("retransmissions", "fast_retransmissions", "spurious_retransmissions", "out_of_order", "dup_acks", "likely_retransmissions", "late_arrivals", "duplicate_copies", "retx_undetermined", "dup_ack_bursts", "zero_windows", "resets",
                                 "rtt_samples", "rtt_min_ms", "rtt_avg_ms", "rtt_p95_ms", "rtt_max_ms", "rtt_ts_samples", "rtt_ts_avg_ms", "flows_with_issues")},
     }
-    for k in ("retransmissions", "out_of_order", "dup_acks", "seq_gaps", "flows_with_issues", "rtt_samples", "zero_windows", "resets"):
+    for k in ("retransmissions", "out_of_order", "dup_acks", "likely_retransmissions", "late_arrivals", "duplicate_copies", "retx_undetermined", "dup_ack_bursts", "flows_with_issues", "rtt_samples", "zero_windows", "resets"):
         summary[k] = summary[k] or 0
 
     if ex.partial:
         warnings.append({"level": "warning", "code": "partial_analysis", "message":
                          f"Partial analysis: packet-level metrics (flows, TCP analysis, protocol pages) use the first {ex.processed:,} of {totals['packets']:,} packets "
                          f"(MAX_EXTRACTED_PACKETS={ex.limit:,}). Capture totals, the protocol hierarchy and endpoint statistics cover the whole file."})
+    if scope is not None:
+        warnings.append({"level": "info", "code": "scoped_analysis", "message":
+                         f"Scoped analysis: only {scopemod.label(scope)} traffic was analysed. Totals, charts and pages cover that traffic only; "
+                         f"everything else in the capture was skipped to save time and memory."})
     if ts.unavailable:
         warnings.append({"level": "info", "code": "fields_unavailable", "message":
                          f"This tshark version does not provide {len(ts.unavailable)} field(s); related metrics are unavailable: {', '.join(sorted(ts.unavailable))}."})
-    if not df["is_tcp"].any():
+    if (scope is None or "tcp" in scope) and not df["is_tcp"].any():
         warnings.append({"level": "info", "code": "no_tcp", "message": "This capture contains no TCP traffic, so the TCP pages have nothing to show."})
 
     meta = {"file": filename or os.path.basename(path), "format": kind, "file_size_bytes": os.path.getsize(path), "tshark": ts.version}
     metadata = {"engine_version": ENGINE_VERSION, "tshark_version": ts.version, "analysis_scope": "partial" if ex.partial else "full", "partial": ex.partial,
+                "protocol_scope": sorted(scope) if scope else "all", "display_filter": flt,
                 "total_packets": totals["packets"], "packets_processed": ex.processed, "extraction_limit": ex.limit or None,
                 "limits": {"max_pcap_size_mb": limits.max_pcap_size_mb, "max_analysis_seconds": limits.max_analysis_seconds, "max_extracted_packets": limits.max_extracted_packets},
                 "elapsed_s": round(time.monotonic() - t0, 2), "unavailable_fields": sorted(ts.unavailable),

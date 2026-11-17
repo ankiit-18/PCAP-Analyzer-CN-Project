@@ -50,17 +50,42 @@ def _b(tok):
     return _n(tok[0]) * _UNIT.get(tok[1] or "bytes", 1)
 
 
-def totals(ts: Tshark, path: str) -> dict:
-    """tshark -z io,stat,0 : frames, bytes, duration for the WHOLE capture."""
-    out = ts.stat(path, "io,stat,0")
+def _spec(spec: str, flt: str | None) -> str:
+    return f"{spec},{flt}" if flt else spec
+
+
+_SECTION_TITLES = {"io": "IO Statistics", "phs": "Protocol Hierarchy Statistics", "ip": "IPv4 Endpoints"}
+
+
+def stats_bundle(ts: Tshark, path: str, flt: str | None = None) -> dict[str, str]:
+    """ONE tshark pass for io,stat + io,phs + IPv4 endpoints (these used to be three separate full passes).
+    Returns the raw text of each section: {"io": ..., "phs": ..., "ip": ...}. `flt` restricts every statistic to the selected traffic."""
+    out = ts.run(["-n", "-r", path, "-q", "-z", _spec("io,stat,0", flt), "-z", _spec("io,phs", flt), "-z", _spec("endpoints,ip", flt)])
+    lines = out.splitlines()
+    marks = {}
+    for i, line in enumerate(lines):
+        for key, title in _SECTION_TITLES.items():
+            if title in line and key not in marks:
+                marks[key] = i
+    order = sorted(marks.items(), key=lambda kv: kv[1])
+    sections = {k: "" for k in _SECTION_TITLES}
+    for n, (key, start) in enumerate(order):
+        end = order[n + 1][1] if n + 1 < len(order) else len(lines)
+        sections[key] = "\n".join(lines[max(start - 1, 0):end])
+    return sections
+
+
+def totals(ts: Tshark, path: str, flt: str | None = None, raw: str | None = None) -> dict:
+    """tshark -z io,stat,0 : frames, bytes, duration for the whole capture (or only the selected traffic when `flt` is given)."""
+    out = raw if raw is not None else ts.stat(path, _spec("io,stat,0", flt))
     dur = re.search(r"Duration:\s*([\d.]+)", out)
     row = re.search(r"\|\s*[\d.]+\s*<>\s*[\d.]+\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|", out)
     return {"packets": int(row.group(1)) if row else None, "bytes": int(row.group(2)) if row else None,
             "duration_s": float(dur.group(1)) if dur else None, "raw": out}
 
 
-def hierarchy(ts: Tshark, path: str) -> tuple[pd.DataFrame, str]:
-    raw = ts.stat(path, "io,phs")
+def hierarchy(ts: Tshark, path: str, flt: str | None = None, raw: str | None = None) -> tuple[pd.DataFrame, str]:
+    raw = raw if raw is not None else ts.stat(path, _spec("io,phs", flt))
     rows = []
     for line in raw.splitlines():
         m = re.match(r"^(\s*)(\S+)\s+frames:(\d+)\s+bytes:(\d+)", line)
@@ -73,9 +98,9 @@ def hierarchy(ts: Tshark, path: str) -> tuple[pd.DataFrame, str]:
     return df, raw
 
 
-def endpoints(ts: Tshark, path: str, kind: str = "ip") -> pd.DataFrame:
+def endpoints(ts: Tshark, path: str, kind: str = "ip", flt: str | None = None, raw: str | None = None) -> pd.DataFrame:
     """tshark -z endpoints,<ip|ipv6|tcp|udp>"""
-    raw = ts.stat(path, f"endpoints,{kind}")
+    raw = raw if raw is not None else ts.stat(path, _spec(f"endpoints,{kind}", flt))
     rows = []
     for line in raw.splitlines():
         s = line.strip()

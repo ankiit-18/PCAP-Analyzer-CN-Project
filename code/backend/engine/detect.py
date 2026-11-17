@@ -40,7 +40,7 @@ def detect(ctx: Context) -> list[dict]:
         if mask.any():
             out.append({"key": key, "label": LABELS[key], "packets": int(mask.sum()), "bytes": int(df.loc[mask, "length"].sum()), "heuristic": False})
     # RTP on bare UDP is only visible to Wireshark's heuristic dissector - checked once, only when UDP exists and no RTP was dissected
-    if not any(d["key"] == "rtp" for d in out) and any(d["key"] == "udp" for d in out):
+    if ctx.scope is None and not any(d["key"] == "rtp" for d in out) and any(d["key"] == "udp" for d in out):
         try:
             s = capture.rtp_streams(ctx.ts, ctx.path, True)
             if len(s):

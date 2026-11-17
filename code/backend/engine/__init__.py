@@ -7,6 +7,7 @@
 from .config import ENGINE_VERSION, Limits
 from .errors import AnalysisTimeout, CaptureTooLarge, EngineError, InvalidCapture, TsharkMissing
 from .report import Report, analyze, to_dict
+from .scope import ALL as PROTOCOL_SCOPES
 from .validate import cross_validate
 
-__all__ = ["analyze", "to_dict", "cross_validate", "Report", "Limits", "ENGINE_VERSION", "EngineError", "InvalidCapture", "CaptureTooLarge", "AnalysisTimeout", "TsharkMissing"]
+__all__ = ["analyze", "to_dict", "cross_validate", "Report", "Limits", "ENGINE_VERSION", "PROTOCOL_SCOPES", "EngineError", "InvalidCapture", "CaptureTooLarge", "AnalysisTimeout", "TsharkMissing"]

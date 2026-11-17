@@ -20,6 +20,8 @@ ANALYSIS = {
     "duplicate_ack": "tcp.analysis.duplicate_ack", "lost_segment": "tcp.analysis.lost_segment",
     "ack_lost_segment": "tcp.analysis.ack_lost_segment",
 }
+# Wireshark flags that are still extracted (columns) but no longer shown as indicators / tags
+UNTAGGED = {"lost_segment", "ack_lost_segment"}
 # further Wireshark TCP-analysis flags (flow control / keep-alive) - boolean columns only, not "indicator" tags
 WINDOW_FLAGS = {
     "zero_window": "tcp.analysis.zero_window", "zero_window_probe": "tcp.analysis.zero_window_probe",
@@ -107,6 +109,8 @@ def convert(ch: pd.DataFrame) -> pd.DataFrame:
     d["flags"] = flags.str.rstrip(",").where(d["is_tcp"], "")
     tags = pd.Series("", index=ch.index)
     for k in ANALYSIS:
+        if k in UNTAGGED:                       # sequence gaps are only a side effect of reordering / loss: not shown as an indicator of their own
+            continue
         tags = tags + d[k].map({True: k + ",", False: ""})
     d["tags"] = tags.str.rstrip(",")
     return d
@@ -121,10 +125,11 @@ class Extraction:
     limit: int
 
 
-def extract_packets(ts: Tshark, path: str, total_packets: int | None) -> Extraction:
+def extract_packets(ts: Tshark, path: str, total_packets: int | None, display_filter: str | None = None) -> Extraction:
+    """`display_filter` (protocol scope) keeps only the selected traffic, so unselected packets never become rows."""
     limit = ts.limits.max_extracted_packets
     cap = limit if (limit and (total_packets is None or total_packets > limit)) else 0
-    df = ts.fields(path, None, FIELDS, max_packets=cap, chunk_fn=convert)
+    df = ts.fields(path, display_filter, FIELDS, max_packets=cap, chunk_fn=convert)
     if df.empty:
         from .errors import InvalidCapture
         raise InvalidCapture("tshark returned no packets - the capture may be empty, truncated or corrupt.")

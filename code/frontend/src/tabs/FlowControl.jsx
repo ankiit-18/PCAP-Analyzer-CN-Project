@@ -3,6 +3,7 @@ import { getFlowControl } from '../api.js'
 import Chart from '../components/Chart.jsx'
 import { Card, DataTable, Empty, FlowSelect } from '../components/ui.jsx'
 import { PALETTE, fmtBytes, fmtNum } from '../lib.js'
+import FlowControlEvents from './FlowControlEvents.jsx'
 
 const STATUS = { scaled: 'Scaled', unscaled: 'Not scaled', uncertain: 'Uncertain' }
 
@@ -49,6 +50,7 @@ export default function FlowControl({ id, report, flow, setFlow }) {
               {option ? <Chart option={option} height={360} /> : <Empty>No window data.</Empty>}
             </Card>
           )}
+          <FlowControlEvents fc={d.fc} flow={flow} />
           <Card title="Receive window by flow and direction" sub={`${rows.length} direction${rows.length === 1 ? '' : 's'}`}>
             <DataTable rows={rows} pageSize={12} defaultSort={{ key: 'flow', dir: 'asc' }} columns={[
               { key: 'flow', label: 'Flow', num: true }, { key: 'direction', label: 'Direction' }, { key: 'scale_status', label: 'Window scale', render: status },
@@ -58,12 +60,6 @@ export default function FlowControl({ id, report, flow, setFlow }) {
               { key: 'zero_window_probes', label: 'Probes', num: true }, { key: 'window_updates', label: 'Window updates', num: true }, { key: 'window_full', label: 'Window full', num: true },
             ]} />
           </Card>
-          {d.events.length > 0 && (
-            <Card title="Window events">
-              <DataTable rows={d.events} pageSize={10} columns={[{ key: 'packet_no', label: 'Packet', num: true }, { key: 'rel_time', label: 'Time (s)', num: true, render: (v) => v?.toFixed(4) },
-                { key: 'direction_label', label: 'Sender' }, { key: 'kind', label: 'Event' }, { key: 'eff_win', label: 'Effective window', num: true, render: fmtBytes }, { key: 'win_status', label: 'Scale status' }]} />
-            </Card>
-          )}
         </>
       )}
     </div>

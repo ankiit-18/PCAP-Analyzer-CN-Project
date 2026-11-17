@@ -29,10 +29,13 @@ export function uploadFile(file, onProgress) {
 }
 
 export const health = () => req('/api/health')
-export const analyze = (id) => req(`/api/analyze/${id}`, { method: 'POST' })
+// protocols: array like ['tcp', 'udp']; empty / omitted = analyse everything
+export const analyze = (id, protocols = []) =>
+  req(`/api/analyze/${id}${protocols.length ? `?protocols=${encodeURIComponent(protocols.join(','))}` : ''}`, { method: 'POST' })
 export const getReport = (id) => req(`/api/reports/${id}`)
 export const getIndicators = (id, flow) => req(`/api/reports/${id}/indicators${flow == null ? '' : `?flow=${flow}`}`)
 export const getFlow = (id, flow) => req(`/api/reports/${id}/flows/${flow}`)
+export const getFlowEvents = (id, flow) => req(`/api/reports/${id}/flows/${flow}/events`)
 export const getPackets = (id, flow, { offset = 0, limit = 100, flaggedOnly = false } = {}) =>
   req(`/api/reports/${id}/flows/${flow}/packets?offset=${offset}&limit=${limit}&flagged_only=${flaggedOnly}`)
 export const deleteReport = (id) => req(`/api/reports/${id}`, { method: 'DELETE' })
@@ -44,6 +47,8 @@ export const getProtocolPackets = (id, key, { offset = 0, limit = 100, q = '', f
   const f = Object.entries(filters).filter(([, v]) => v !== '' && v != null && v !== false).map(([k, v]) => `&f_${k}=${encodeURIComponent(v === true ? '1' : v)}`).join('')
   return req(`/api/reports/${id}/protocols/${encodeURIComponent(key)}/packets?offset=${offset}&limit=${limit}&q=${encodeURIComponent(q)}${f}`)
 }
+export const getProtocolIo = (id, key, { interval = null, measure = 'packets', split = 'none' } = {}) =>
+  req(`/api/reports/${id}/protocols/${encodeURIComponent(key)}/io?measure=${measure}&split=${split}${interval ? `&interval=${interval}` : ''}`)
 export const decodePacket = (id, no) => req(`/api/reports/${id}/packets/${no}/decode`)
 
 // ---- TCP deep analysis, IP, validation, export ----
@@ -51,6 +56,8 @@ const fq = (flow) => (flow == null ? '' : `?flow=${flow}`)
 export const getTcpRtt = (id, flow) => req(`/api/reports/${id}/tcp/rtt${fq(flow)}`)
 export const getFlowControl = (id, flow) => req(`/api/reports/${id}/tcp/flow-control${fq(flow)}`)
 export const getCongestion = (id, flow) => req(`/api/reports/${id}/tcp/congestion${fq(flow)}`)
+export const getTcpThroughput = (id, flow) => req(`/api/reports/${id}/tcp/throughput${fq(flow)}`)
+export const getTcpRetransmissions = (id, flow) => req(`/api/reports/${id}/tcp/retransmissions${fq(flow)}`)
 export const getTcpOptions = (id, flow) => req(`/api/reports/${id}/tcp/options${fq(flow)}`)
 export const getTcpPackets = (id, { flow = null, conds = [], offset = 0, limit = 100 } = {}) =>
   req(`/api/reports/${id}/tcp/packets?offset=${offset}&limit=${limit}${flow == null ? '' : `&flow=${flow}`}${conds.map((c) => `&cond=${c}`).join('')}`)

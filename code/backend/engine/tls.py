@@ -20,8 +20,20 @@ CONTENT = {20: "ChangeCipherSpec", 21: "Alert", 22: "Handshake", 23: "Applicatio
 ECH_EXT = 65037      # encrypted_client_hello (0xfe0d)
 
 
+def is_grease(v) -> bool:
+    """GREASE (RFC 8701): reserved placeholder values 0x0A0A, 0x1A1A ... 0xFAFA that browsers add to ClientHello lists on purpose,
+    so that servers and middleboxes keep tolerating unknown values. They are not real versions or cipher suites."""
+    return v is not None and (v >> 8) == (v & 0xFF) and (v & 0x0F) == 0x0A
+
+
 def _ver(v):
-    return TLS_VER.get(v, f"0x{v:04x}") if v is not None else ""
+    if v is None:
+        return ""
+    if v in TLS_VER:
+        return TLS_VER[v]
+    if 0x7F00 <= v <= 0x7FFF:                                  # TLS 1.3 draft versions (0x7f1c = draft 28)
+        return f"TLS 1.3 (draft {v & 0xFF})"
+    return f"0x{v:04x}"
 
 
 def analyze(ctx: Context) -> tuple[dict, pd.DataFrame]:
@@ -31,6 +43,7 @@ def analyze(ctx: Context) -> tuple[dict, pd.DataFrame]:
                                 ("ctype", "tls.record.content_type"), ("san", "x509ce.dNSName"), ("utc", "x509af.utcTime")])
     conns, alerts, ctypes = {}, [], []
     offered_ver, offered_ciph = [], []
+    grease = {"versions": 0, "ciphers": 0}            # GREASE placeholders seen (ignored in the charts, counted in the note)
     for x in df.itertuples():
         key = x.stream or f"pkt{x.no}"
         c = conns.setdefault(key, {"stream": key, "client": None, "server": None, "sni": "", "alpn_offered": "", "alpn": "", "version": "", "cipher": "", "offered_versions": "",
@@ -42,9 +55,13 @@ def analyze(ctx: Context) -> tuple[dict, pd.DataFrame]:
             c["sni"] = c["sni"] or next(iter(values(x.sni)), "")
             c["alpn_offered"] = ", ".join(values(x.alpn))
             sv = [to_int(v) for v in values(x.sver)]
-            c["offered_versions"] = ", ".join(_ver(v) for v in sv if v is not None)
-            offered_ver += [_ver(v) for v in sv if v is not None]
-            offered_ciph += [CIPHERS.get(to_int(v), f"0x{to_int(v):04x}") for v in values(x.cipher) if to_int(v) is not None]
+            real_sv = [v for v in sv if v is not None and not is_grease(v)]
+            grease["versions"] += sum(1 for v in sv if is_grease(v))
+            c["offered_versions"] = ", ".join(_ver(v) for v in real_sv)
+            offered_ver += [_ver(v) for v in real_sv]
+            cs = [to_int(v) for v in values(x.cipher)]
+            grease["ciphers"] += sum(1 for v in cs if is_grease(v))
+            offered_ciph += [CIPHERS.get(v, f"0x{v:04x}") for v in cs if v is not None and not is_grease(v)]
             c["ech"] = ECH_EXT in [to_int(v) for v in values(x.exts)]
         if 2 in types:                                                       # ServerHello
             sv = [to_int(v) for v in values(x.sver)] or [to_int(v) for v in values(x.ver)]
@@ -91,9 +108,12 @@ def analyze(ctx: Context) -> tuple[dict, pd.DataFrame]:
     charts = {c["id"]: c for c in clean([
         over_time("tls_time", "TLS packets over time", df["rel_time"]),
         counts_chart("tls_ver", "Negotiated TLS version", vc, "pie", tip="From the ServerHello (supported_versions extension for TLS 1.3)."),
-        counts_chart("tls_overs", "Versions offered by clients", pd.Series(offered_ver, dtype=str), "bar", tip="supported_versions extension of the ClientHello (empty for clients that only send the legacy version field)."),
+        counts_chart("tls_overs", "Versions offered by clients", pd.Series(offered_ver, dtype=str), "bar",
+                     tip="supported_versions extension of the ClientHello (empty for clients that only send the legacy version field). "
+                         f"{grease['versions']} GREASE placeholder value(s) such as 0xfafa or 0xeaea were left out: browsers add them on purpose (RFC 8701) and they are not real versions."),
         counts_chart("tls_cipher", "Negotiated cipher suite", ok["cipher"].replace("", pd.NA).dropna(), "barh"),
-        counts_chart("tls_ociph", "Cipher suites offered by clients (top)", pd.Series(offered_ciph, dtype=str), "barh", top=10),
+        counts_chart("tls_ociph", "Cipher suites offered by clients (top)", pd.Series(offered_ciph, dtype=str), "barh", top=10,
+                     tip=f"{grease['ciphers']} GREASE placeholder cipher value(s) were left out (RFC 8701)."),
         counts_chart("tls_sni", "Top server names (SNI)", conn["sni"], "barh"), counts_chart("tls_alpn", "ALPN (negotiated)", conn["alpn"].replace("", pd.NA).dropna(), "pie"),
         counts_chart("tls_alpno", "ALPN (offered)", conn["alpn_offered"], "bar"),
         counts_chart("tls_rec", "TLS record types", pd.Series(ctypes, dtype=str), "bar", tip="Handshake / Alert / ChangeCipherSpec / Application data record counts."),
@@ -119,6 +139,7 @@ def analyze(ctx: Context) -> tuple[dict, pd.DataFrame]:
         "metrics": metrics, "charts": list(charts.values()), "tables": list(tables.values()), "sections": sections,
         "notes": ["HTTPS/TLS application data is encrypted: only handshake metadata (SNI, versions, cipher suites, ALPN, certificates up to TLS 1.2) is visible.",
                   "TLS 1.3 encrypts most of the handshake after ServerHello, and Encrypted ClientHello can hide the server name.",
+                  f"GREASE placeholders (RFC 8701, values like 0xfafa) are ignored: {grease['versions']} in version lists and {grease['ciphers']} in cipher lists.",
                   "No decryption keys are used; encrypted content is never inspected."],
     }
     return detail, df

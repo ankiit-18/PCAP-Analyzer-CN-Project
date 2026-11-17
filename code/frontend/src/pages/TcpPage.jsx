@@ -19,7 +19,7 @@ export default function TcpPage({ id, report, flow, setFlow, sub, setSub }) {
       <div className="subtabs">
         {TCP_TABS.map(([k, l]) => <button key={k} className={`tab ${sub === k ? 'active' : ''}`} onClick={() => setSub(k)}>{l}</button>)}
       </div>
-      {sub === 'summary' && <Overview report={report} onOpenFlow={(f) => open(f, 'drill')} />}
+      {sub === 'summary' && <Overview id={id} report={report} onOpenFlow={(f) => open(f, 'drill')} />}
       {sub === 'flows' && <Flows report={report} onIndicators={(f) => open(f, 'indicators')} onDrill={(f) => open(f, 'drill')} />}
       {sub === 'rtt' && <Rtt id={id} report={report} flow={flow} setFlow={setFlow} />}
       {sub === 'flowcontrol' && <FlowControl id={id} report={report} flow={flow} setFlow={setFlow} />}

@@ -24,12 +24,13 @@ class TcpResult:
     flows: pd.DataFrame = field(default_factory=pd.DataFrame)
     findings: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["packet_no", "rel_time", "flow", "direction", "src", "sport", "dst", "dport", "seq", "ack", "flags", "tags", "wireshark_message"]))
     rtt_ack: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["ack_packet", "rel_time", "flow", "direction", "rtt", "acks_frame"]))   # tcp.analysis.ack_rtt     (observed)
-    rtt_initial: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["packet", "rel_time", "flow", "rtt"]))                              # tcp.analysis.initial_rtt (observed)
+    rtt_initial: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["packet", "rel_time", "flow", "rtt"]))                              # tcp.analysis.initial_rtt (observed), one row per flow
     rtt_ts: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["flow", "packet", "rel_time", "rtt", "measured_toward"]))                # timestamp echo           (derived)
     options: pd.DataFrame = field(default_factory=pd.DataFrame)       # one row per flow
     options_dir: pd.DataFrame = field(default_factory=pd.DataFrame)   # one row per flow and direction
     window_dir: pd.DataFrame = field(default_factory=pd.DataFrame)    # one row per flow and direction
     congestion: pd.DataFrame = field(default_factory=pd.DataFrame)    # one row per flow (inferred assessment)
+    retx: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=RETX_COLUMNS))      # one row per flagged retransmission, with interval and verdict (derived)
     summary: dict = field(default_factory=dict)
 
 
@@ -225,9 +226,6 @@ def build_flows(df: pd.DataFrame, roles: pd.DataFrame) -> pd.DataFrame:
     f["spurious_retransmissions"] = cnt("spurious_retransmission")
     f["out_of_order"] = cnt("out_of_order")
     f["dup_acks"] = cnt("duplicate_ack")
-    f["lost_segments"] = cnt("lost_segment")
-    f["ack_lost_segments"] = cnt("ack_lost_segment")
-    f["seq_gaps"] = f["lost_segments"] + f["ack_lost_segments"]          # compat: earlier versions reported the sum
     f["zero_windows"] = cnt("zero_window")
     f["resets"] = cnt("rst")
     r = tcp["ack_rtt"].dropna()
@@ -241,7 +239,7 @@ def build_flows(df: pd.DataFrame, roles: pd.DataFrame) -> pd.DataFrame:
     syn = tcp[tcp["syn"] & ~tcp["ack_flag"]].groupby("tcp_stream").size().reindex(roles.index).fillna(0) > 0
     synack = tcp[tcp["syn"] & tcp["ack_flag"]].groupby("tcp_stream").size().reindex(roles.index).fillna(0) > 0
     f["handshake_seen"] = (syn & synack).to_numpy()
-    f["issues"] = f["retransmissions"] + f["out_of_order"] + f["seq_gaps"]
+    f["issues"] = f["retransmissions"] + f["out_of_order"]
     return f.reset_index()
 
 
@@ -250,6 +248,113 @@ def build_findings(df: pd.DataFrame) -> pd.DataFrame:
     f = f.rename(columns={"no": "packet_no", "tcp_stream": "flow", "exp_msg": "wireshark_message"})
     f["flow"] = f["flow"].astype(int)
     return f.reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------------------------------------------
+# retransmission intervals: how long after the original transmission did each retransmission happen?   (derived)
+# --------------------------------------------------------------------------------------------------------------
+RETX_COLUMNS = ["packet_no", "flow", "rel_time", "direction", "seq", "length", "kind", "transmission", "original_no", "since_original_ms",
+                "previous_no", "since_previous_ms", "overtaken_by_no", "late_after_ms", "interval_ms", "basis", "reference_no", "handshake_rtt_ms", "faster_than_rtt", "verdict"]
+
+
+VERDICT_LABEL = {"retransmission": "Likely retransmission", "reordering": "Likely reordering (late arrival)", "duplicate": "Likely duplicate copy",
+                 "undetermined": "Undetermined"}
+
+
+def dup_ack_bursts(df: pd.DataFrame) -> pd.Series:
+    """Per flow: number of runs of 3 or more duplicate ACKs for the same ACK number from the same side. That is TCP's own fast-retransmit trigger;
+    a single duplicate ACK is just as often a sign of reordering."""
+    t = df[df["is_tcp"] & df["duplicate_ack"]].sort_values(["tcp_stream", "no"])
+    if t.empty:
+        return pd.Series(dtype=int)
+    run = ((t["tcp_stream"] != t["tcp_stream"].shift()) | (t["role"] != t["role"].shift()) | (t["ack"] != t["ack"].shift())).cumsum()
+    sizes = t.groupby(run).agg(flow=("tcp_stream", "first"), n=("no", "size"))
+    return sizes[sizes["n"] >= 3].groupby("flow").size()
+
+
+def retransmission_intervals(df: pd.DataFrame, handshake_rtt_s: dict | None = None) -> pd.DataFrame:
+    """One row per packet that Wireshark flagged as a retransmission (or fast retransmission).
+
+    The original is found by us, not by Wireshark: the earlier captured packet of the same connection and direction that carried the very same
+    bytes (same sequence number, same length, same SYN/FIN flags). Then
+        since_original = time(retransmission) - time(first transmission)      (what the "time interval of the retransmission" means)
+        since_previous = time(retransmission) - time(the transmission right before it)   (differs from the above on the 2nd, 3rd ... retry)
+    `transmission` is 2 for the first retransmission, 3 for the second retry, and so on.
+
+    Where no matching original was captured (lost before the capture point, sent before the capture started, or the segment was re-cut) we use the
+    next best thing: the first earlier packet of the same connection and direction that carries HIGHER sequence numbers, i.e. the segment that
+    overtook the missing bytes and opened the hole. `late_after_ms` = how long after that segment the missing bytes showed up. The original was sent
+    before the overtaking segment, so the true time since the original is at least this long (a lower bound). `interval_ms` is the exact value when
+    the original was captured, else this lower bound; `basis` says which ("original" / "overtaken").
+    `verdict` (inferred) says what the packet most likely is: "retransmission" (interval of at least one handshake RTT), "reordering" (original not
+    captured and the packet arrived within one RTT of the segment that overtook it: a late arrival), "duplicate" (original captured but the copy came
+    within one RTT: a duplicate copy), or "undetermined" (no interval or no handshake RTT to compare with).
+    `faster_than_rtt` (inferred) is True when the
+    interval is shorter than the connection's handshake RTT: a retransmission triggered by loss needs at least about one round trip of
+    feedback, so such a repeat is more likely a duplicate or a reordered copy than a loss recovery."""
+    out = pd.DataFrame(columns=RETX_COLUMNS)
+    t = df[df["is_tcp"]]
+    if t.empty:
+        return out
+    flagged = (t["retransmission"] | t["fast_retransmission"]).fillna(False)
+    if not flagged.any():
+        return out
+    key = ["tcp_stream", "direction", "seq", "tcp_len", "syn", "fin"]
+    seg = t[(t["tcp_len"].fillna(0) > 0) | t["syn"] | t["fin"]][["no", "time", "retransmission", "fast_retransmission"] + key].copy()
+    seg["tcp_len"] = seg["tcp_len"].fillna(0)
+    wanted = seg[(seg["retransmission"] | seg["fast_retransmission"]).fillna(False)][key].drop_duplicates()   # only segments that were retransmitted
+    cand = seg.merge(wanted, on=key, how="inner").sort_values("no")
+    g = cand.groupby(key, sort=False)
+    cand["transmission"] = g.cumcount() + 1
+    cand["original_no"], cand["original_t"] = g["no"].transform("first"), g["time"].transform("first")
+    cand["previous_no"], cand["previous_t"] = g["no"].shift(), g["time"].shift()
+    info = cand.set_index("no")[["transmission", "original_no", "original_t", "previous_no", "previous_t"]]
+
+    f = t[flagged][["no", "rel_time", "time", "tcp_stream", "direction", "seq", "tcp_len", "fast_retransmission"]].copy()
+    f = f.join(info, on="no")
+    has_orig = f["transmission"].fillna(1) > 1                       # transmission 1 = this is the first captured copy: its original is not in the capture
+    since_o = ((f["time"] - f["original_t"]) * 1000).where(has_orig)
+    since_p = ((f["time"] - f["previous_t"]) * 1000).where(has_orig)
+    since_o, since_p = since_o.where(since_o >= 0), since_p.where(since_p >= 0)       # negative = capture timestamps out of order; not a real interval
+    res = pd.DataFrame({
+        "packet_no": f["no"].astype(int), "flow": f["tcp_stream"].astype(int), "rel_time": f["rel_time"], "direction": f["direction"], "seq": f["seq"],
+        "length": f["tcp_len"].fillna(0).astype(int), "kind": np.where(f["fast_retransmission"], "fast retransmission", "retransmission"),
+        "transmission": f["transmission"].where(has_orig), "original_no": f["original_no"].where(has_orig), "since_original_ms": since_o,
+        "previous_no": f["previous_no"].where(has_orig), "since_previous_ms": since_p})
+    # --- no captured original: time since the segment that overtook the missing bytes (lower bound) ---
+    res["overtaken_by_no"], res["late_after_ms"] = np.nan, np.nan
+    todo = res[res["since_original_ms"].isna()]
+    if len(todo):
+        ft = f.set_index("no")
+        data = t[t["tcp_len"].fillna(0) > 0][["no", "time", "tcp_stream", "direction", "seq"]]
+        need = pd.MultiIndex.from_frame(todo[["flow", "direction"]].drop_duplicates())
+        data = data[pd.MultiIndex.from_arrays([data["tcp_stream"].astype(int), data["direction"]]).isin(need)]
+        groups = {k: (g["no"].to_numpy(), g["time"].to_numpy(), g["seq"].to_numpy()) for k, g in data.sort_values("no").groupby([data["tcp_stream"].astype(int), "direction"])}
+        for i, row in todo.iterrows():
+            arr = groups.get((row["flow"], row["direction"]))
+            if arr is None or pd.isna(row["seq"]):
+                continue
+            nos, times, seqs = arr
+            pos = int(np.searchsorted(nos, row["packet_no"]))                    # data segments captured before this retransmission
+            hit = np.flatnonzero(seqs[:pos] > row["seq"])
+            if len(hit):
+                j = hit[0]
+                late = (float(ft.at[row["packet_no"], "time"]) - float(times[j])) * 1000
+                if late >= 0:
+                    res.at[i, "overtaken_by_no"], res.at[i, "late_after_ms"] = float(nos[j]), late
+    res["interval_ms"] = res["since_original_ms"].fillna(res["late_after_ms"])
+    res["basis"] = np.where(res["since_original_ms"].notna(), "original", np.where(res["late_after_ms"].notna(), "overtaken", None))
+    res["reference_no"] = res["original_no"].fillna(res["overtaken_by_no"])
+    rtt_ms = res["flow"].map({int(k): float(v) * 1000 for k, v in (handshake_rtt_s or {}).items()})
+    res["handshake_rtt_ms"] = rtt_ms
+    res["faster_than_rtt"] = (res["interval_ms"] < rtt_ms).where(res["interval_ms"].notna() & rtt_ms.notna())
+    # What is this packet most likely? Wireshark calls anything below the highest sequence number seen a "retransmission", even a segment that was merely
+    # delayed. A real retransmission needs about one round trip of feedback, so we compare the interval with the flow's handshake RTT. (inferred)
+    known = res["faster_than_rtt"].notna()
+    res["verdict"] = np.select(
+        [~known, res["faster_than_rtt"] == False, (res["faster_than_rtt"] == True) & (res["basis"] == "original"), (res["faster_than_rtt"] == True) & (res["basis"] == "overtaken")],  # noqa: E712
+        ["undetermined", "retransmission", "duplicate", "reordering"], "undetermined")
+    return res.reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -270,22 +375,25 @@ def _burst(g: pd.DataFrame) -> tuple[float | None, float | None]:
 def assess_flow(row: dict) -> tuple[str, list[dict]]:
     ev = []
     data_pk = max(row["data_packets"], 1)
-    loss = row["retransmissions"] > 0 or row["lost_segments"] > 0 or row["dup_acks"] >= 3
-    reorder = row["out_of_order"] > 0 and row["retransmissions"] == 0
+    # Loss needs a retransmission that really waited (>= 1 round trip) or TCP's own trigger (3 duplicate ACKs in a row). Wireshark's "retransmission" flag alone is not
+    # enough: it also marks segments that were only reordered. Retransmissions we cannot classify (no handshake RTT) still count, to stay on the cautious side.
+    loss = row["retransmissions_likely"] > 0 or row["retx_undetermined"] > 0 or row["dup_ack_bursts"] > 0
+    reorder = (row["out_of_order"] > 0 or row["reordered_late"] > 0 or row["duplicate_copies"] > 0) and not loss
     rwnd = row["zero_windows"] > 0 or row["window_full"] > 0
-    rtt_inflation = row["rtt_ratio"] is not None and row["rtt_ratio"] >= 2 and row["rtt_samples"] >= 10
+    rtt_inflation = row["rtt_ratio"] is not None and row["rtt_ratio"] >= 2 and row["rtt_ratio_samples"] >= 10
     ecn = row["ce_marks"] > 0 or (row["ecn_negotiated"] is True and row["ece_packets"] > 0)
     if row["retransmissions"]:
-        ev.append({"basis": "observed", "text": f"{row['retransmissions']} retransmitted segment(s) ({100 * row['retransmissions'] / data_pk:.1f}% of data packets), "
+        ev.append({"basis": "observed", "text": f"{row['retransmissions']} packet(s) flagged as retransmissions by Wireshark ({100 * row['retransmissions'] / data_pk:.1f}% of data packets), "
                                                 f"{row['fast_retransmissions']} fast, {row['spurious_retransmissions']} spurious"})
+        ev.append({"basis": "derived", "text": f"Of those: {row['retransmissions_likely']} likely real (took at least one round trip), {row['reordered_late']} late arrivals (reordering), "
+                                               f"{row['duplicate_copies']} duplicate copies, {row['retx_undetermined']} undetermined"})
     if row["dup_acks"]:
-        ev.append({"basis": "observed", "text": f"{row['dup_acks']} duplicate ACK(s)"})
-    if row["lost_segments"]:
-        ev.append({"basis": "observed", "text": f"{row['lost_segments']} sequence gap(s) ('previous segment not captured') – real loss or capture miss"})
+        ev.append({"basis": "observed", "text": f"{row['dup_acks']} duplicate ACK(s), {row['dup_ack_bursts']} run(s) of 3 or more for the same number"})
     if row["out_of_order"]:
         ev.append({"basis": "observed", "text": f"{row['out_of_order']} out-of-order segment(s)"})
     if rtt_inflation:
-        ev.append({"basis": "derived", "text": f"RTT rose to {row['rtt_p95_ms']:.1f} ms (p95) vs {row['rtt_min_ms']:.1f} ms minimum ({row['rtt_ratio']:.1f}×) – could be queueing or ACK delay"})
+        ev.append({"basis": "derived", "text": f"RTT rose to {row['rtt_ratio_p95_ms']:.1f} ms (p95) vs {row['rtt_ratio_min_ms']:.1f} ms minimum ({row['rtt_ratio']:.1f}×) for ACKs of the "
+                                               f"{row['rtt_ratio_dir']} data – could be queueing or ACK delay"})
     if rwnd:
         ev.append({"basis": "observed", "text": f"{row['zero_windows']} zero-window and {row['window_full']} window-full event(s) – receiver flow control"})
     if ecn:
@@ -321,14 +429,26 @@ def build_congestion(df: pd.DataFrame, flows: pd.DataFrame, options: pd.DataFram
         fr = fl.loc[sid]
         gd = g[~g["syn"]]                      # ECN/CWR on SYN packets is negotiation, not congestion signalling
         rtt = g["ack_rtt"].dropna() * 1e3
+        # RTT inflation is judged per direction of the ACKs, and only for real network round trips: with a capture on one end, ACKs for the other
+        # side's data are produced on the capturing machine and come back in microseconds (below 1 ms), which would make any ratio meaningless
+        infl = None
+        for dirn, gg in g[g["ack_rtt"].notna()].groupby("direction"):
+            x = gg["ack_rtt"] * 1e3
+            if len(x) >= 10 and x.min() >= 1.0:
+                ratio = float(x.quantile(0.95) / x.min())
+                if infl is None or ratio > infl["ratio"]:
+                    infl = {"ratio": ratio, "min": float(x.min()), "p95": float(x.quantile(0.95)), "n": int(len(x)), "dir": "client's" if dirn == "fwd" else "server's"}
         bif = g["bytes_in_flight"].dropna()
         peak, burst = _burst(g)
         row = {"flow": sid, "client": fr["client"], "server": fr["server"], "data_packets": int((g["tcp_len"] > 0).sum()),
                "retransmissions": int(fr["retransmissions"]), "fast_retransmissions": int(fr["fast_retransmissions"]), "spurious_retransmissions": int(fr["spurious_retransmissions"]),
-               "dup_acks": int(fr["dup_acks"]), "out_of_order": int(fr["out_of_order"]), "lost_segments": int(fr["lost_segments"]),
+               "dup_acks": int(fr["dup_acks"]), "out_of_order": int(fr["out_of_order"]), "dup_ack_bursts": int(fr["dup_ack_bursts"]),
+               "retransmissions_likely": int(fr["retransmissions_likely"]), "reordered_late": int(fr["reordered_late"]), "duplicate_copies": int(fr["duplicate_copies"]),
+               "retx_undetermined": int(fr["retx_undetermined"]),
                "zero_windows": int(g["zero_window"].sum()), "window_full": int(g["window_full"].sum()),
                "rtt_samples": int(len(rtt)), "rtt_min_ms": float(rtt.min()) if len(rtt) else None, "rtt_p95_ms": float(rtt.quantile(0.95)) if len(rtt) else None,
-               "rtt_ratio": float(rtt.quantile(0.95) / rtt.min()) if len(rtt) and rtt.min() > 0 else None,
+               "rtt_ratio": infl["ratio"] if infl else None, "rtt_ratio_min_ms": infl["min"] if infl else None, "rtt_ratio_p95_ms": infl["p95"] if infl else None,
+               "rtt_ratio_samples": infl["n"] if infl else 0, "rtt_ratio_dir": infl["dir"] if infl else None,
                "bytes_in_flight_max": float(bif.max()) if len(bif) else None, "bytes_in_flight_avg": float(bif.mean()) if len(bif) else None,
                "ece_packets": int(gd["ece"].sum()), "cwr_packets": int(gd["cwr"].sum()), "ce_marks": int((gd["ecn"] == 3).sum()),
                "ecn_negotiated": (opt.loc[sid, "ecn_negotiated"] if sid in getattr(opt, "index", []) else None),
@@ -342,13 +462,13 @@ def build_congestion(df: pd.DataFrame, flows: pd.DataFrame, options: pd.DataFram
 # --------------------------------------------------------------------------------------------------------------
 # orchestrator
 # --------------------------------------------------------------------------------------------------------------
-def analyze(df: pd.DataFrame) -> TcpResult:
-    """Adds role / direction / eff_win / win_status columns to `df` and returns every TCP table."""
+def analyze(df: pd.DataFrame, enabled: bool = True) -> TcpResult:
+    """Adds role / direction / eff_win / win_status columns to `df` and returns every TCP table. enabled=False (TCP not in the protocol scope) skips the work."""
     res = TcpResult()
     for col, default in (("role", ""), ("eff_win", np.nan), ("win_status", "")):      # columns the packet views rely on, even without TCP
         if col not in df.columns:
             df[col] = default
-    if not df["is_tcp"].any():
+    if not enabled or not df["is_tcp"].any():
         return res
     roles = assign_roles(df)
     res.options, res.options_dir, res.window_dir = analyze_options_and_windows(df, roles)
@@ -358,10 +478,18 @@ def analyze(df: pd.DataFrame) -> TcpResult:
     res.rtt_ack = tcp[tcp["ack_rtt"].notna()][["no", "rel_time", "tcp_stream", "direction", "ack_rtt", "acks_frame"]].rename(
         columns={"no": "ack_packet", "tcp_stream": "flow", "ack_rtt": "rtt"}).reset_index(drop=True)
     res.rtt_ack["flow"] = res.rtt_ack["flow"].astype(int)
-    res.rtt_initial = tcp[tcp["initial_rtt"].notna()][["no", "rel_time", "tcp_stream", "initial_rtt"]].rename(
+    # Wireshark puts initial_rtt (SYN -> SYN-ACK) on EVERY packet after the handshake, but it is one measurement per connection:
+    # keep only the first packet of each flow (the one that completes the handshake), so samples = flows
+    res.rtt_initial = tcp[tcp["initial_rtt"].notna()].sort_values("no").drop_duplicates("tcp_stream")[["no", "rel_time", "tcp_stream", "initial_rtt"]].rename(
         columns={"no": "packet", "tcp_stream": "flow", "initial_rtt": "rtt"}).reset_index(drop=True)
     res.rtt_initial["flow"] = res.rtt_initial["flow"].astype(int)
     res.rtt_ts = timestamp_rtt(df, res.options)
+    # classify every flagged retransmission once (real retransmission vs late arrival vs duplicate) and count it per flow
+    res.retx = retransmission_intervals(df, res.rtt_initial.groupby("flow")["rtt"].first().to_dict() if len(res.rtt_initial) else {})
+    per = res.retx.groupby(["flow", "verdict"]).size().unstack(fill_value=0).reindex(columns=["retransmission", "reordering", "duplicate", "undetermined"], fill_value=0) if len(res.retx) else pd.DataFrame(columns=["retransmission", "reordering", "duplicate", "undetermined"])
+    for col, name in (("retransmission", "retransmissions_likely"), ("reordering", "reordered_late"), ("duplicate", "duplicate_copies"), ("undetermined", "retx_undetermined")):
+        res.flows[name] = res.flows["flow"].map(per[col]).fillna(0).astype(int)
+    res.flows["dup_ack_bursts"] = res.flows["flow"].map(dup_ack_bursts(df)).fillna(0).astype(int)
     res.congestion = build_congestion(df, res.flows, res.options, res.window_dir)
 
     n = lambda c: int(tcp[c].sum())
@@ -371,7 +499,10 @@ def analyze(df: pd.DataFrame) -> TcpResult:
         "tcp_packets": int(len(tcp)), "tcp_flows": int(len(res.flows)),
         "retransmissions": int((tcp["retransmission"] | tcp["fast_retransmission"]).sum()), "fast_retransmissions": n("fast_retransmission"),
         "spurious_retransmissions": n("spurious_retransmission"), "out_of_order": n("out_of_order"), "dup_acks": n("duplicate_ack"),
-        "seq_gaps": n("lost_segment") + n("ack_lost_segment"), "lost_segments": n("lost_segment"), "zero_windows": n("zero_window"), "resets": n("rst"),
+        "zero_windows": n("zero_window"), "resets": n("rst"),
+        "likely_retransmissions": int(res.flows["retransmissions_likely"].sum()), "late_arrivals": int(res.flows["reordered_late"].sum()),
+        "duplicate_copies": int(res.flows["duplicate_copies"].sum()), "retx_undetermined": int(res.flows["retx_undetermined"].sum()),
+        "dup_ack_bursts": int(res.flows["dup_ack_bursts"].sum()),
         "rtt_samples": ack["count"] if ack else 0, "rtt_min_ms": ack["min"] if ack else None, "rtt_avg_ms": ack["avg"] if ack else None,
         "rtt_p95_ms": ack["p95"] if ack else None, "rtt_max_ms": ack["max"] if ack else None,
         "rtt_ts_samples": ts["count"] if ts else 0, "rtt_ts_avg_ms": ts["avg"] if ts else None,

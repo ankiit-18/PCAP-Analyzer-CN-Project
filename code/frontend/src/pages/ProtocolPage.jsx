@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getProtocol } from '../api.js'
 import { ChartCard } from '../components/GenericChart.jsx'
+import IoGraph from '../components/IoGraph.jsx'
 import { DecodeDrawer, PacketInspector } from '../components/PacketInspector.jsx'
 import { MetricGrid, SpecTable } from '../components/Spec.jsx'
 import { Card, Empty, Section } from '../components/ui.jsx'
@@ -54,6 +55,7 @@ export default function ProtocolPage({ id, pkey, onNavigate }) {
               <MetricGrid metrics={metricsOf(cur)} />
             </Section>
           )}
+          {cur.io && <IoGraph id={id} pkey={pkey} />}
           {cur.charts?.some((c) => charts[c]) && <div className="grid cols-2">{cur.charts.filter((c) => charts[c]).map((c) => <ChartCard key={c} spec={charts[c]} />)}</div>}
           {cur.tables?.filter((t) => tables[t]).map((t) => <SpecTable key={t} spec={tables[t]} onRow={onRow} />)}
         </>

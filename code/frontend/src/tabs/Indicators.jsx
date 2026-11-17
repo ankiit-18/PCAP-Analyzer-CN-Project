@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { getIndicators } from '../api.js'
 import Chart from '../components/Chart.jsx'
 import { Card, DataTable, Empty, FlowSelect, Stat, TagBadges } from '../components/ui.jsx'
+import RetxIntervals from './RetxIntervals.jsx'
 import { INDICATORS, INDICATOR_KEYS, fmtNum } from '../lib.js'
 
-const TONE = { retransmission: 'bad', out_of_order: 'warn', duplicate_ack: 'info', lost_segment: 'gap' }
+const TONE = { retransmission: 'bad', out_of_order: 'warn', duplicate_ack: 'info' }
 
 export default function Indicators({ id, report, flow, setFlow, onDrill }) {
   const [data, setData] = useState(null)
@@ -68,11 +69,10 @@ export default function Indicators({ id, report, flow, setFlow, onDrill }) {
       {data && (
         <>
           <div className="stats">
-            <Stat label="Retransmissions" value={fmtNum((data.counts.retransmission || 0) + (data.counts.fast_retransmission || 0))}
-                  sub={`${data.counts.fast_retransmission || 0} fast · ${data.counts.spurious_retransmission || 0} spurious`} tone="bad" />
+            <Stat label="Retransmissions" value={fmtNum(data.retransmissions_total)}
+                  sub={`flagged by Wireshark · ${data.counts.fast_retransmission || 0} fast · ${data.counts.spurious_retransmission || 0} spurious (see the interval section for how many are likely real)`} tone="bad" />
             <Stat label="Duplicate ACKs" value={fmtNum(data.counts.duplicate_ack)} tone="info" />
             <Stat label="Out-of-order" value={fmtNum(data.counts.out_of_order)} tone="warn" />
-            <Stat label="Sequence gaps" value={fmtNum((data.counts.lost_segment || 0) + (data.counts.ack_lost_segment || 0))} tone="gap" />
             <Stat label="Flagged packets" value={fmtNum(data.flagged_packets)} sub={flow == null ? 'whole capture' : `flow #${flow}`} />
           </div>
           {data.flagged_packets === 0 ? <Card><Empty>✅ Wireshark flagged no TCP anomalies {flow == null ? 'in this capture' : 'in this flow'}.</Empty></Card> : (
@@ -81,6 +81,7 @@ export default function Indicators({ id, report, flow, setFlow, onDrill }) {
                 <Card title="Indicators by type"><Chart option={countOpt} height={290} /></Card>
                 <Card title="When they occurred"><Chart option={timelineOpt} height={290} /></Card>
               </div>
+              <RetxIntervals id={id} flow={flow} onDrill={onDrill} />
               {byFlowOpt && <Card title="Indicators per flow">
                 <Chart option={byFlowOpt} height={280} onClick={(p) => onDrill(Number(String(data.by_flow[p.dataIndex].flow)))} /></Card>}
               <Card title="Flagged packets" sub={data.events.length < data.flagged_packets ? `showing first ${fmtNum(data.events.length)} of ${fmtNum(data.flagged_packets)}` : 'Click a row to open its flow'}

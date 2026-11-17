@@ -13,6 +13,7 @@ import pandas as pd
 
 from . import capture
 from .report import Report
+from . import scope as scopemod
 from .tshark import Tshark
 
 EXPLANATIONS = [
@@ -30,6 +31,10 @@ def _m(detail: dict | None, label: str):
         if m["label"] == label and m.get("available"):
             return m["value"]
     return None
+
+
+# cross-validation area -> protocol scope that must be selected for it to be checked
+AREA_SCOPE = {"TCP": "tcp", "TCP options": "tcp", "Window scaling": "tcp", "IP": "ip", "UDP": "udp", "DNS": "dns", "TLS": "tls"}
 
 
 def cross_validate(r: Report, limits=None) -> dict:
@@ -51,12 +56,13 @@ def cross_validate(r: Report, limits=None) -> dict:
         ("TCP", "Spurious retransmissions", int(tcp["spurious_retransmission"].sum()), "dissected", lambda: count("tcp.analysis.spurious_retransmission"), ""),
         ("TCP", "Duplicate ACKs", int(tcp["duplicate_ack"].sum()), "dissected", lambda: count("tcp.analysis.duplicate_ack"), ""),
         ("TCP", "Out-of-order", int(tcp["out_of_order"].sum()), "dissected", lambda: count("tcp.analysis.out_of_order"), ""),
-        ("TCP", "Lost-segment flags", int(tcp["lost_segment"].sum()), "dissected", lambda: count("tcp.analysis.lost_segment"), ""),
         ("TCP", "Zero-window events (Wireshark flag)", int(tcp["zero_window"].sum()), "dissected", lambda: count("tcp.analysis.zero_window"), ""),
         ("TCP", "Zero-window advertisements (engine: window field = 0)", int(((tcp["win_raw"] == 0) & ~tcp["syn"] & ~tcp["rst"]).sum()), "derived",
          lambda: count("tcp.window_size_value == 0 && tcp.flags.syn == 0 && tcp.flags.reset == 0"), "Engine reads the raw 16-bit window; reference filters the same condition."),
         ("TCP", "ACK-based RTT samples", int(len(t.rtt_ack)), "dissected", lambda: count("tcp.analysis.ack_rtt"), ""),
-        ("TCP", "Handshake RTT samples", int(len(t.rtt_initial)), "dissected", lambda: count("tcp.analysis.initial_rtt"), ""),
+        ("TCP", "Packets carrying a handshake RTT", int(tcp["initial_rtt"].notna().sum()), "dissected", lambda: count("tcp.analysis.initial_rtt"),
+         "Wireshark sets this on every packet after the handshake; the dashboard counts one measurement per flow."),
+        ("TCP", "Flows with a handshake RTT (one sample each)", int(len(t.rtt_initial)), "aggregated", lambda: None, "Engine-only: first packet per flow that has the value."),
         ("TCP options", "SYN packets with window scale", int((tcp["syn"] & tcp["wscale"].notna()).sum()), "dissected", lambda: count("tcp.flags.syn == 1 && tcp.options.wscale.shift"), ""),
         ("TCP options", "SYN packets with SACK-permitted", int((tcp["syn"] & tcp["sack_perm"]).sum()), "dissected", lambda: count("tcp.flags.syn == 1 && tcp.options.sack_perm"), ""),
         ("TCP options", "SYN packets with timestamps", int((tcp["syn"] & tcp["tsval"].notna()).sum()), "dissected", lambda: count("tcp.flags.syn == 1 && tcp.options.timestamp.tsval"), ""),
@@ -81,6 +87,9 @@ def cross_validate(r: Report, limits=None) -> dict:
         ("ICMP", "ICMP + ICMPv6 messages", (_m(D.get("icmp"), "ICMP messages") or 0) + (_m(D.get("icmp"), "ICMPv6 messages") or 0), "dissected", lambda: count("icmp || icmpv6"), ""),
     ]
 
+    if r.ctx.scope is not None:               # scoped run: only check the areas that were analysed (the rest would "differ" by design)
+        rows = [row for row in rows if AREA_SCOPE.get(row[0]) in r.ctx.scope]
+
     def ref(row):
         try:
             return row[4]()
@@ -93,6 +102,6 @@ def cross_validate(r: Report, limits=None) -> dict:
         diff = None if tsv is None else eng - tsv
         out.append({"area": area, "metric": metric, "engine": eng, "basis": basis, "tshark": tsv, "difference": diff,
                     "status": "no reference" if tsv is None else ("match" if diff == 0 else "differs"), "note": note})
-    return {"rows": out, "explanations": EXPLANATIONS, "scope": "first %d packets" % cap if cap else "full capture",
+    return {"rows": out, "explanations": EXPLANATIONS, "scope": ("first %d packets" % cap if cap else "full capture") + ("" if r.ctx.scope is None else " · protocols: " + scopemod.label(r.ctx.scope)),
             "summary": {"checked": sum(1 for o in out if o["tshark"] is not None), "matching": sum(1 for o in out if o["status"] == "match"),
                         "differing": sum(1 for o in out if o["status"] == "differs")}}

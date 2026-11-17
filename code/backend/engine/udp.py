@@ -77,6 +77,7 @@ def analyze(ctx: Context) -> tuple[dict, pd.DataFrame]:
         ("size_max", "Max size", "bytes", True), ("iat_mean_ms", "IAT mean", "ms", True), ("iat_std_ms", "IAT std", "ms", True), ("iat_max_ms", "IAT max", "ms", True)],
         tip="One row per canonical bidirectional 5-tuple. → = same direction as the first datagram. IAT = inter-arrival time. Click a row to inspect its first datagram.", click="first_no")}
     sections = [{"id": "summary", "title": "Summary", "metrics": "all", "charts": ["udp_traffic", "udp_apps"]},
+                {"id": "iograph", "title": "IO Graph", "io": True},
                 {"id": "conversations", "title": "Conversations", "tables": ["conversations"]},
                 {"id": "traffic", "title": "Traffic Analysis", "charts": ["udp_bytes", "udp_ports", "udp_topflows", "udp_size", "udp_payload"]}]
     detail = {

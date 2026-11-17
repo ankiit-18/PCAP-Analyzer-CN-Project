@@ -18,7 +18,26 @@ function Steps({ stage }) {
   )
 }
 
-function UploadScreen({ stage, file, progress, error, onPick, onAnalyze, onReset, backend }) {
+const SCOPE_CHOICES = [['tcp', 'TCP'], ['udp', 'UDP'], ['dns', 'DNS'], ['tls', 'TLS'], ['quic', 'QUIC'], ['arp', 'ARP'], ['ip', 'IP']]
+
+/** Choose what to analyse. Nothing selected = everything. A smaller scope means fewer tshark passes and less memory on big captures. */
+function ScopePicker({ value, onChange }) {
+  const toggle = (k) => onChange(value.includes(k) ? value.filter((x) => x !== k) : [...value, k])
+  return (
+    <div className="card scope">
+      <div style={{ textAlign: 'left' }}>
+        <b>What do you want to analyze?</b>
+        <div className="muted">Pick only the protocols you need: large captures load faster and use less memory. Leave everything unselected to analyze it all.</div>
+      </div>
+      <div className="scope-chips">
+        <button className={`chip ${value.length === 0 ? 'on' : ''}`} onClick={() => onChange([])}>Everything</button>
+        {SCOPE_CHOICES.map(([k, l]) => <button key={k} className={`chip ${value.includes(k) ? 'on' : ''}`} onClick={() => toggle(k)}>{l}</button>)}
+      </div>
+    </div>
+  )
+}
+
+function UploadScreen({ stage, file, progress, error, onPick, onAnalyze, onReset, backend, scope, setScope }) {
   const input = useRef(null)
   const [over, setOver] = useState(false)
   const drop = (e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files?.[0]; f && onPick(f) }
@@ -26,7 +45,7 @@ function UploadScreen({ stage, file, progress, error, onPick, onAnalyze, onReset
   return (
     <div className="hero">
       <h1>PCAP Network Analyzer</h1>
-      <div className="muted">Upload a packet capture, run the tshark engine, and explore TCP flows, RTT, retransmissions and sequence gaps.</div>
+      <div className="muted">Upload a packet capture, run the tshark engine, and explore TCP flows, RTT, retransmissions and out-of-order packets.</div>
       <Steps stage={stage} />
 
       {backend && !backend.ok && <div className="err">Backend problem: {backend.error}</div>}
@@ -49,14 +68,15 @@ function UploadScreen({ stage, file, progress, error, onPick, onAnalyze, onReset
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             <button className="btn" onClick={onReset}>Choose another</button>
-            <button className="btn primary" onClick={onAnalyze}>Analyze</button>
+            <button className="btn primary" onClick={onAnalyze}>{scope.length ? `Analyze ${scope.length} protocol${scope.length > 1 ? 's' : ''}` : 'Analyze everything'}</button>
           </div>
         </div>
       )}
+      {stage === 'ready' && file && <ScopePicker value={scope} onChange={setScope} />}
 
       {stage === 'analyzing' && (
         <div className="card"><div className="spinner" /><b>Analyzing {file?.filename}…</b>
-          <div className="muted">Running tshark: packet fields, TCP analysis, protocol hierarchy, endpoints. Large captures can take a minute.</div></div>
+          <div className="muted">Running tshark on {scope.length ? scope.map((k) => k.toUpperCase()).join(', ') : 'all protocols'}. Large captures can take a while.</div></div>
       )}
       {error && <div className="err">{error}</div>}
     </div>
@@ -74,6 +94,7 @@ export default function App() {
   const [flow, setFlow] = useState(null)           // shared per-flow scope for the TCP tabs
   const [tcpSub, setTcpSub] = useState('summary')   // active TCP tab
   const [backend, setBackend] = useState(null)
+  const [scope, setScope] = useState([])           // protocols to analyse; [] = everything
 
   useEffect(() => { health().then(setBackend).catch(() => setBackend({ ok: false, error: 'Cannot reach the backend on port 8000. Start it with: uvicorn main:app --port 8000' })) }, [])
 
@@ -86,7 +107,7 @@ export default function App() {
 
   const run = async () => {
     setError(''); setStage('analyzing')
-    try { await analyze(file.id); const [r, o] = await Promise.all([getReport(file.id), getOverview(file.id)]); setReport(r); setOv(o); setFlow(null); setView('overview'); setStage('results') }
+    try { await analyze(file.id, scope); const [r, o] = await Promise.all([getReport(file.id), getOverview(file.id)]); setReport(r); setOv(o); setFlow(null); setView('overview'); setStage('results') }
     catch (e) { setError(e.message); setStage('ready') }
   }
 
@@ -120,7 +141,7 @@ export default function App() {
       </header>
 
       {stage !== 'results' ? (
-        <main className="page"><UploadScreen {...{ stage, file, progress, error, backend }} onPick={pick} onAnalyze={run} onReset={reset} /></main>
+        <main className="page"><UploadScreen {...{ stage, file, progress, error, backend, scope, setScope }} onPick={pick} onAnalyze={run} onReset={reset} /></main>
       ) : (
         <>
         <nav className="navbar">

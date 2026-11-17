@@ -17,6 +17,13 @@ export function fmtBps(n) {
 }
 
 export const fmtMs = (n, d = 2) => (n == null || Number.isNaN(n) ? '–' : `${Number(n).toFixed(d)} ms`)
+// a duration given in milliseconds, in the most readable unit (µs / ms / s)
+export const fmtDur = (ms) => {
+  if (ms == null || Number.isNaN(ms)) return '–'
+  if (ms < 1) return `${(ms * 1000).toFixed(ms * 1000 < 10 ? 1 : 0)} µs`
+  if (ms < 1000) return `${ms.toFixed(ms < 10 ? 2 : 1)} ms`
+  return `${(ms / 1000).toFixed(2)} s`
+}
 export const fmtSec = (n, d = 3) => (n == null || Number.isNaN(n) ? '–' : `${Number(n).toFixed(d)} s`)
 
 // Wireshark TCP-analysis indicators (tshark fields tcp.analysis.*)
@@ -27,13 +34,11 @@ export const INDICATORS = {
   spurious_retransmission: { label: 'Spurious retransmission', color: '#a0612b', symbol: 'rect', size: 9, hint: 'Retransmission of data already ACKed' },
   out_of_order: { label: 'Out-of-order', color: '#f08c00', symbol: 'diamond', size: 12, hint: 'Segment arrives behind a higher sequence' },
   duplicate_ack: { label: 'Duplicate ACK', color: '#3b82f6', symbol: 'triangle', rotate: 180, size: 10, hint: 'Repeated ACK number' },
-  lost_segment: { label: 'Sequence gap', color: '#8b5cf6', symbol: 'triangle', size: 12, hint: '"Previous segment not captured" – possible loss (inferred)' },
-  ack_lost_segment: { label: 'ACK of uncaptured data', color: '#a855f7', symbol: 'pin', size: 12, hint: 'ACK for data that was never captured' },
 }
 export const INDICATOR_KEYS = Object.keys(INDICATORS)
 // further Wireshark flow-control flags (used by the Flow Control tab / packet filters)
 export const CONDITIONS = [
-  ['retransmission', 'Retransmissions'], ['dup_ack', 'Duplicate ACKs'], ['out_of_order', 'Out-of-order'], ['lost_segment', 'Sequence gaps'],
+  ['retransmission', 'Retransmissions'], ['dup_ack', 'Duplicate ACKs'], ['out_of_order', 'Out-of-order'],
   ['zero_window', 'Zero-window'], ['zero_window_probe', 'Zero-window probes'], ['window_update', 'Window updates'], ['window_full', 'Window full'], ['ecn', 'ECN (ECE/CWR/CE)'],
 ]
 export const BASIS_LABEL = { observed: 'Observed (dissected by tshark)', derived: 'Derived (calculated by the engine)', inferred: 'Inferred (interpretation, not proof)' }

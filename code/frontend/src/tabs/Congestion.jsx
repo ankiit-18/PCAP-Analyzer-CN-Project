@@ -33,8 +33,8 @@ export default function Congestion({ id, report, flow, setFlow }) {
           <Card title="Indicators by flow">
             <DataTable rows={d.flows} pageSize={10} columns={[
               { key: 'flow', label: 'Flow', num: true }, { key: 'data_packets', label: 'Data pkts', num: true, render: fmtNum }, { key: 'retransmission_pct', label: 'Retrans %', num: true, render: (v) => (v == null ? '–' : `${v.toFixed(1)}%`) },
-              { key: 'retransmissions', label: 'Retrans', num: true }, { key: 'fast_retransmissions', label: 'Fast', num: true }, { key: 'spurious_retransmissions', label: 'Spurious', num: true },
-              { key: 'dup_acks', label: 'Dup ACKs', num: true }, { key: 'out_of_order', label: 'Out-of-order', num: true }, { key: 'lost_segments', label: 'Seq gaps', num: true },
+              { key: 'retransmissions', label: 'Retrans (flagged)', num: true }, { key: 'retransmissions_likely', label: 'Likely real', num: true }, { key: 'reordered_late', label: 'Late arrivals', num: true }, { key: 'fast_retransmissions', label: 'Fast', num: true }, { key: 'spurious_retransmissions', label: 'Spurious', num: true },
+              { key: 'dup_acks', label: 'Dup ACKs', num: true }, { key: 'out_of_order', label: 'Out-of-order', num: true },
               { key: 'rtt_min_ms', label: 'RTT min', num: true, render: (v) => fmtMs(v) }, { key: 'rtt_p95_ms', label: 'RTT p95', num: true, render: (v) => fmtMs(v) },
               { key: 'bytes_in_flight_max', label: 'Max bytes in flight', num: true, render: (v) => (v == null ? 'n/a' : fmtBytes(v)) },
               { key: 'ecn_negotiated', label: 'ECN negotiated', render: yn }, { key: 'ce_marks', label: 'CE marks', num: true }, { key: 'ece_packets', label: 'ECE', num: true },

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { getFlow, getPackets } from '../api.js'
 import { Card, DataTable, Empty, FlowSelect, Stat, TagBadges } from '../components/ui.jsx'
 import { fmtBps, fmtBytes, fmtMs, fmtNum, fmtSec } from '../lib.js'
+import FlowEvents from './FlowEvents.jsx'
 
 const PAGE = 100
 
@@ -87,11 +88,13 @@ export default function DrillDown({ id, report, flow, setFlow }) {
             <div className="stats">
               <Stat label="Packets" value={fmtNum(fl.packets)} /><Stat label="Bytes" value={fmtBytes(fl.bytes)} />
               <Stat label="Duration" value={fmtSec(fl.duration_s)} /><Stat label="Throughput" value={fmtBps(fl.throughput_bps)} />
-              <Stat label="Retransmissions" value={fmtNum(fl.retransmissions)} tone="bad" /><Stat label="Duplicate ACKs" value={fmtNum(fl.dup_acks)} tone="info" />
-              <Stat label="Out-of-order" value={fmtNum(fl.out_of_order)} tone="warn" /><Stat label="Sequence gaps" value={fmtNum(fl.seq_gaps)} tone="gap" />
+              <Stat label="Retransmissions" value={fmtNum(fl.retransmissions)} tone="bad" sub={`flagged · ${fmtNum(fl.retransmissions_likely)} likely real, ${fmtNum(fl.reordered_late)} late arrivals`} /><Stat label="Duplicate ACKs" value={fmtNum(fl.dup_acks)} tone="info" />
+              <Stat label="Out-of-order" value={fmtNum(fl.out_of_order)} tone="warn" />
               <Stat label="RTT avg" value={fmtMs(fl.rtt_avg_ms)} sub={fl.rtt_samples ? `${fl.rtt_samples} samples · handshake ${fmtMs(fl.handshake_rtt_ms)}` : 'no samples'} />
             </div>
           </Card>
+
+          <FlowEvents id={id} flow={flow} />
 
           <Card title="Flagged packets in this flow" sub={flagged.length ? `${flagged.length} packet${flagged.length === 1 ? '' : 's'}` : ''}>
               {flagged.length ? (

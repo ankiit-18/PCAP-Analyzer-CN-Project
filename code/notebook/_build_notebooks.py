@@ -178,9 +178,9 @@ d.sort_values().plot.barh(figsize=(7, 3), title="Packets per detected protocol")
     code('''if rep.tcp.flows.empty:
     print("No TCP traffic in this capture.")
 else:
-    print({k: rep.tcp.summary[k] for k in ("tcp_flows", "retransmissions", "fast_retransmissions", "spurious_retransmissions", "out_of_order", "dup_acks", "seq_gaps", "zero_windows", "flows_with_issues")})
+    print({k: rep.tcp.summary[k] for k in ("tcp_flows", "retransmissions", "fast_retransmissions", "spurious_retransmissions", "out_of_order", "dup_acks", "zero_windows", "flows_with_issues")})
     cols = ["flow", "client", "server", "packets", "bytes", "payload_bytes", "duration_s", "throughput_bps", "packets_per_s", "avg_packet_size", "pkts_c2s", "pkts_s2c",
-            "retransmissions", "fast_retransmissions", "spurious_retransmissions", "out_of_order", "dup_acks", "lost_segments", "handshake_rtt_ms", "rtt_samples", "rtt_avg_ms"]
+            "retransmissions", "fast_retransmissions", "spurious_retransmissions", "out_of_order", "dup_acks", "handshake_rtt_ms", "rtt_samples", "rtt_avg_ms"]
     display(rep.tcp.flows[cols].round(3).head(15))
     print("Flagged packets (Wireshark tcp.analysis.*)"); display(rep.tcp.findings.head(15))''')
 

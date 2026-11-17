@@ -40,6 +40,7 @@ import engine
 from engine import ip as ip_mod, tcp_views as tv
 from engine.capture import validate_capture
 from engine.config import Limits
+from engine.iograph import io_graph
 from engine.detect import DETAIL_PAGES
 from engine.errors import EngineError
 from engine.extract import ANALYSIS
@@ -112,7 +113,7 @@ def health():
     lim = {"max_upload_mb": LIMITS.max_pcap_size_mb, "max_analysis_seconds": LIMITS.max_analysis_seconds, "max_extracted_packets": LIMITS.max_extracted_packets}
     try:
         ts.require()
-        return {"ok": True, "tshark": ts.version, "engine": engine.ENGINE_VERSION, **lim}
+        return {"ok": True, "tshark": ts.version, "engine": engine.ENGINE_VERSION, "protocols": list(engine.PROTOCOL_SCOPES), **lim}
     except EngineError as e:
         return {"ok": False, "error": str(e), **lim}
 
@@ -143,13 +144,16 @@ async def upload(file: UploadFile = File(...)):
 
 
 @app.post("/api/analyze/{sid}")
-def analyze(sid: str):
+def analyze(sid: str, protocols: str | None = None):
+    """protocols: optional comma-separated scope (tcp,udp,dns,tls,quic,arp,ip). Omit (or 'all') to analyse everything."""
     s = _session(sid)
     t0 = time.time()
+    s["report"] = None                    # free the previous report first (matters when re-analysing a big capture)
     with SLOTS:
-        rep = engine.analyze(s["path"], LIMITS, filename=s["filename"])
-    s["report"] = rep
-    return {"id": sid, "elapsed_s": round(time.time() - t0, 2), "partial": rep.metadata["partial"], "warnings": len(rep.warnings)}
+        rep = engine.analyze(s["path"], LIMITS, filename=s["filename"], protocols=protocols)
+    s["report"], s["validation"] = rep, None
+    return {"id": sid, "elapsed_s": round(time.time() - t0, 2), "partial": rep.metadata["partial"], "warnings": len(rep.warnings),
+            "scope": rep.metadata["protocol_scope"]}
 
 
 @app.delete("/api/reports/{sid}")
@@ -263,7 +267,10 @@ def indicators(sid: str, flow: int | None = Query(None)):
     if flow is not None:
         _flow(r, flow)
         f = f[f["flow"] == flow]
-    out = {"scope": "all" if flow is None else flow, "counts": _tag_counts(f), "flagged_packets": int(len(f)), "events": records(f.head(LIMITS.sample_cap).round(6)), "by_flow": []}
+    tagsets = f["tags"].str.split(",") if len(f) else pd.Series([], dtype=object)
+    # a fast retransmission is also flagged as a retransmission by Wireshark: count packets, not flags
+    retx_total = int(tagsets.apply(lambda t: "retransmission" in t or "fast_retransmission" in t).sum()) if len(f) else 0
+    out = {"scope": "all" if flow is None else flow, "counts": _tag_counts(f), "retransmissions_total": retx_total, "flagged_packets": int(len(f)), "events": records(f.head(LIMITS.sample_cap).round(6)), "by_flow": []}
     if flow is None and len(f):
         by = f.assign(tag=f["tags"].str.split(",")).explode("tag").groupby(["flow", "tag"]).size().unstack(fill_value=0)
         by["total"] = by.sum(axis=1)
@@ -282,6 +289,13 @@ def flow_detail(sid: str, flow: int):
         "flow": fl.to_dict(), "counts": _tag_counts(f), "flagged_packets": int((g["tags"] != "").sum()), "findings": records(f.head(LIMITS.sample_cap).round(6)),
         "packets_total": int(len(g)), "role_known": bool(fl["role_known"]),
     })
+
+
+@app.get("/api/reports/{sid}/flows/{flow}/events")
+def flow_events(sid: str, flow: int):
+    r = _rep(sid)
+    _flow(r, flow)
+    return tv.flow_events(r, flow)
 
 
 @app.get("/api/reports/{sid}/flows/{flow}/packets")
@@ -313,6 +327,22 @@ def tcp_congestion(sid: str, flow: int | None = None):
     if flow is not None:
         _flow(r, flow)
     return tv.congestion(r, flow)
+
+
+@app.get("/api/reports/{sid}/tcp/throughput")
+def tcp_throughput(sid: str, flow: int | None = None):
+    r = _rep(sid)
+    if flow is not None:
+        _flow(r, flow)
+    return tv.throughput(r, flow)
+
+
+@app.get("/api/reports/{sid}/tcp/retransmissions")
+def tcp_retransmissions(sid: str, flow: int | None = None):
+    r = _rep(sid)
+    if flow is not None:
+        _flow(r, flow)
+    return tv.retransmissions(r, flow)
 
 
 @app.get("/api/reports/{sid}/tcp/options")
@@ -347,6 +377,17 @@ def protocol_detail(sid: str, key: str):
         failed = next((w for w in r.warnings if w["code"] == f"analyzer_failed:{key}"), None)
         raise HTTPException(500 if failed else 404, failed["message"] if failed else f"Protocol '{key}' was not detected in this capture.")
     return jsonable(d)
+
+
+@app.get("/api/reports/{sid}/protocols/{key}/io")
+def protocol_io(sid: str, key: str, interval: float | None = None, measure: str = "packets", split: str = "none"):
+    """Wireshark-style I/O graph of one protocol's packets. interval (seconds) omitted = automatic; measure: packets | bytes | bits; split: none | app | conversation."""
+    r = _rep(sid)
+    detail = protocol_detail(sid, key)
+    df = r.views.get(key)
+    if df is None:
+        raise HTTPException(404, f"No packet data for '{key}'.")
+    return jsonable(io_graph(df, interval, measure, split, name=detail.get("label") or key.upper()))
 
 
 @app.get("/api/reports/{sid}/protocols/{key}/packets")

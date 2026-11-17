@@ -21,6 +21,7 @@ class Context:
     partial: bool = False
     max_packets: int = 0                  # 0 = no cap; else every detailed pass reads only the first N packets
     heuristic_rtp: bool = False
+    scope: frozenset | None = None        # protocol scope (None = everything); see engine.scope
     scratch: dict = field(default_factory=dict)
 
     @property
